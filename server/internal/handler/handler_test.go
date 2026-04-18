@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -231,6 +232,17 @@ func assertJSONEqual(t *testing.T, got []byte, want string) {
 	if string(gotJSON) != string(wantJSON) {
 		t.Fatalf("expected JSON %s, got %s", string(wantJSON), string(gotJSON))
 	}
+}
+
+func responseCookieValue(t *testing.T, resp *http.Response, name string) string {
+	t.Helper()
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == name {
+			return cookie.Value
+		}
+	}
+	t.Fatalf("expected cookie %q in response", name)
+	return ""
 }
 
 func TestIssueCRUD(t *testing.T) {
@@ -819,6 +831,106 @@ func TestSendCode(t *testing.T) {
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM verification_code WHERE email = $1`, "sendcode-test@multica.ai")
 	})
+}
+
+func TestProxyLoginDisabled(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy-login", nil)
+	testHandler.ProxyLogin(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("ProxyLogin: expected 404 when disabled, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestProxyLoginRequiresEmailHeader(t *testing.T) {
+	t.Setenv("MULTICA_PROXY_AUTH_EMAIL_HEADER", defaultProxyAuthEmailHeader)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy-login", nil)
+	testHandler.ProxyLogin(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("ProxyLogin: expected 401 without email header, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestProxyLoginCreatesSessionAndRedirects(t *testing.T) {
+	const email = "proxy-login-test@multica.ai"
+	ctx := context.Background()
+
+	t.Setenv("MULTICA_PROXY_AUTH_EMAIL_HEADER", defaultProxyAuthEmailHeader)
+	t.Setenv("APP_ENV", "development")
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, email)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy-login?next=/workspaces/new", nil)
+	req.Header.Set(defaultProxyAuthEmailHeader, email)
+	testHandler.ProxyLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("ProxyLogin: expected 302, got %d: %s", w.Code, w.Body.String())
+	}
+	if location := w.Header().Get("Location"); location != "/workspaces/new" {
+		t.Fatalf("ProxyLogin: expected redirect to /workspaces/new, got %q", location)
+	}
+
+	resp := w.Result()
+	if value := responseCookieValue(t, resp, "multica_auth"); value == "" {
+		t.Fatal("ProxyLogin: expected multica_auth cookie")
+	}
+	if value := responseCookieValue(t, resp, "multica_csrf"); value == "" {
+		t.Fatal("ProxyLogin: expected multica_csrf cookie")
+	}
+
+	user, err := testHandler.Queries.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("ProxyLogin: expected user to be created: %v", err)
+	}
+	if user.Name != "proxy-login-test" {
+		t.Fatalf("ProxyLogin: expected created user name %q, got %q", "proxy-login-test", user.Name)
+	}
+}
+
+func TestProxyLoginRedirectsCliFlowToLoginPage(t *testing.T) {
+	const email = "proxy-cli-test@multica.ai"
+	ctx := context.Background()
+
+	t.Setenv("MULTICA_PROXY_AUTH_EMAIL_HEADER", defaultProxyAuthEmailHeader)
+	t.Setenv("APP_ENV", "development")
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, email)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy-login?cli_callback=http://127.0.0.1:8123/callback&cli_state=abc123&next=/invite/test", nil)
+	req.Header.Set(defaultProxyAuthEmailHeader, email)
+	testHandler.ProxyLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("ProxyLogin: expected 302 for cli flow, got %d: %s", w.Code, w.Body.String())
+	}
+
+	location := w.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("ProxyLogin: expected valid redirect URL, got %q: %v", location, err)
+	}
+	if parsed.Path != "/login" {
+		t.Fatalf("ProxyLogin: expected cli redirect path /login, got %q", parsed.Path)
+	}
+	if got := parsed.Query().Get("cli_callback"); got != "http://127.0.0.1:8123/callback" {
+		t.Fatalf("ProxyLogin: expected cli_callback to round-trip, got %q", got)
+	}
+	if got := parsed.Query().Get("cli_state"); got != "abc123" {
+		t.Fatalf("ProxyLogin: expected cli_state abc123, got %q", got)
+	}
+	if got := parsed.Query().Get("next"); got != "/invite/test" {
+		t.Fatalf("ProxyLogin: expected next /invite/test, got %q", got)
+	}
+	if got := parsed.Query().Get("proxy_auth_done"); got != "1" {
+		t.Fatalf("ProxyLogin: expected proxy_auth_done=1, got %q", got)
+	}
 }
 
 func TestSendCodeRateLimit(t *testing.T) {

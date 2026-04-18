@@ -11,16 +11,25 @@ function createWrapper() {
   );
 }
 
-const { mockSendCode, mockVerifyCode } = vi.hoisted(() => ({
+const {
+  mockSendCode,
+  mockVerifyCode,
+  mockRouterPush,
+  mockRouterReplace,
+  mockSearchParams,
+} = vi.hoisted(() => ({
   mockSendCode: vi.fn(),
   mockVerifyCode: vi.fn(),
+  mockRouterPush: vi.fn(),
+  mockRouterReplace: vi.fn(),
+  mockSearchParams: new URLSearchParams(),
 }));
 
 // Mock next/navigation
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
   usePathname: () => "/login",
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }));
 
 // Mock auth store — shared LoginPage uses getState().sendCode/verifyCode,
@@ -65,6 +74,8 @@ import LoginPage from "./page";
 describe("LoginPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSearchParams.forEach((_, key) => mockSearchParams.delete(key));
+    vi.unstubAllEnvs();
   });
 
   it("renders login form with email input and continue button", () => {
@@ -136,5 +147,33 @@ describe("LoginPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Network error")).toBeInTheDocument();
     });
+  });
+
+  it("redirects to proxy-login when proxy auth is enabled", async () => {
+    vi.stubEnv("NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER", "X-Auth-Request-Email");
+    const replaceSpy = vi
+      .spyOn(window.location, "replace")
+      .mockImplementation(() => undefined);
+
+    render(<LoginPage />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith("/auth/proxy-login");
+    });
+  });
+
+  it("does not redirect back to proxy-login after proxy_auth_done", async () => {
+    vi.stubEnv("NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER", "X-Auth-Request-Email");
+    mockSearchParams.set("proxy_auth_done", "1");
+    const replaceSpy = vi
+      .spyOn(window.location, "replace")
+      .mockImplementation(() => undefined);
+
+    render(<LoginPage />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(screen.getByText("Sign in to Multica")).toBeInTheDocument();
+    });
+    expect(replaceSpy).not.toHaveBeenCalled();
   });
 });

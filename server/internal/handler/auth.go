@@ -56,6 +56,46 @@ type VerifyCodeRequest struct {
 	Code  string `json:"code"`
 }
 
+const (
+	defaultProxyAuthEmailHeader = "X-Auth-Request-Email"
+)
+
+func proxyAuthEnabled() bool {
+	return proxyAuthEmailHeader() != ""
+}
+
+func proxyAuthEmailHeader() string {
+	return http.CanonicalHeaderKey(strings.TrimSpace(os.Getenv("MULTICA_PROXY_AUTH_EMAIL_HEADER")))
+}
+
+func sanitizeRelativeRedirect(raw, fallback string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+		return fallback
+	}
+	return raw
+}
+
+func proxyLoginRedirect(r *http.Request) string {
+	if cliCallback := strings.TrimSpace(r.URL.Query().Get("cli_callback")); cliCallback != "" {
+		q := url.Values{}
+		q.Set("cli_callback", cliCallback)
+		if cliState := strings.TrimSpace(r.URL.Query().Get("cli_state")); cliState != "" {
+			q.Set("cli_state", cliState)
+		}
+		if next := sanitizeRelativeRedirect(r.URL.Query().Get("next"), ""); next != "" {
+			q.Set("next", next)
+		}
+		q.Set("proxy_auth_done", "1")
+		return "/login?" + q.Encode()
+	}
+
+	return sanitizeRelativeRedirect(r.URL.Query().Get("next"), "/")
+}
+
 func generateCode() (string, error) {
 	var buf [4]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -95,6 +135,26 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email string) (db.User, 
 		}
 	}
 	return user, nil
+}
+
+func (h *Handler) findOrCreateProxyUser(ctx context.Context, email string) (db.User, error) {
+	user, err := h.Queries.GetUserByEmail(ctx, email)
+	if err == nil {
+		return user, nil
+	}
+	if !isNotFound(err) {
+		return db.User{}, err
+	}
+
+	name := email
+	if at := strings.Index(email, "@"); at > 0 {
+		name = email[:at]
+	}
+
+	return h.Queries.CreateUser(ctx, db.CreateUserParams{
+		Name:  name,
+		Email: email,
+	})
 }
 
 func (h *Handler) SendCode(w http.ResponseWriter, r *http.Request) {
@@ -388,6 +448,48 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		Token: tokenString,
 		User:  userToResponse(user),
 	})
+}
+
+func (h *Handler) ProxyLogin(w http.ResponseWriter, r *http.Request) {
+	if !proxyAuthEnabled() {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	emailHeader := proxyAuthEmailHeader()
+	email := strings.ToLower(strings.TrimSpace(r.Header.Get(emailHeader)))
+	if email == "" {
+		writeError(w, http.StatusUnauthorized, "proxy auth email header missing")
+		return
+	}
+
+	user, err := h.findOrCreateProxyUser(r.Context(), email)
+	if err != nil {
+		slog.Error("proxy auth user resolution failed", append(logger.RequestAttrs(r), "error", err, "email", email)...)
+		writeError(w, http.StatusInternalServerError, "failed to resolve user")
+		return
+	}
+
+	tokenString, err := h.issueJWT(user)
+	if err != nil {
+		slog.Warn("proxy auth failed", append(logger.RequestAttrs(r), "error", err, "email", email)...)
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	if err := auth.SetAuthCookies(w, tokenString); err != nil {
+		slog.Warn("failed to set auth cookies", append(logger.RequestAttrs(r), "error", err, "email", email)...)
+	}
+
+	if h.CFSigner != nil {
+		for _, cookie := range h.CFSigner.SignedCookies(time.Now().Add(30 * 24 * time.Hour)) {
+			http.SetCookie(w, cookie)
+		}
+	}
+
+	redirectTo := proxyLoginRedirect(r)
+	slog.Info("user logged in via proxy auth", append(logger.RequestAttrs(r), "user_id", uuidToString(user.ID), "email", user.Email, "redirect", redirectTo)...)
+	http.Redirect(w, r, redirectTo, http.StatusFound)
 }
 
 // IssueCliToken returns a fresh JWT for the authenticated user.

@@ -18,16 +18,24 @@ function LoginPageContent() {
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
   const searchParams = useSearchParams();
+  const proxyAuthEnabled = !!process.env.NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER;
 
   const cliCallbackRaw = searchParams.get("cli_callback");
   const cliState = searchParams.get("cli_state") || "";
   const platform = searchParams.get("platform");
+  const proxyAuthDone = searchParams.get("proxy_auth_done") === "1";
   // `next` carries a protected URL the user was originally headed to
   // (e.g. /invite/{id}). With URL-driven workspaces there is no legacy
   // "/issues" default — if `next` is absent we decide after login based on
   // the user's workspace list. Sanitize first so a crafted `?next=https://evil`
   // cannot bounce the user off-origin after a successful login.
   const nextUrl = sanitizeNextUrl(searchParams.get("next"));
+
+  useEffect(() => {
+    if (!proxyAuthEnabled || proxyAuthDone || isLoading || user) return;
+    const query = searchParams.toString();
+    window.location.replace(query ? `/auth/proxy-login?${query}` : "/auth/proxy-login");
+  }, [proxyAuthDone, proxyAuthEnabled, isLoading, user, searchParams]);
 
   // Already authenticated — honor ?next= or fall back to first workspace
   // (or /workspaces/new if the user has none). Skip this entire path when

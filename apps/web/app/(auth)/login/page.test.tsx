@@ -148,32 +148,4 @@ describe("LoginPage", () => {
       expect(screen.getByText("Network error")).toBeInTheDocument();
     });
   });
-
-  it("redirects to proxy-login when proxy auth is enabled", async () => {
-    vi.stubEnv("NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER", "X-Auth-Request-Email");
-    const replaceSpy = vi
-      .spyOn(window.location, "replace")
-      .mockImplementation(() => undefined);
-
-    render(<LoginPage />, { wrapper: createWrapper() });
-
-    await waitFor(() => {
-      expect(replaceSpy).toHaveBeenCalledWith("/auth/proxy-login");
-    });
-  });
-
-  it("does not redirect back to proxy-login after proxy_auth_done", async () => {
-    vi.stubEnv("NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER", "X-Auth-Request-Email");
-    mockSearchParams.set("proxy_auth_done", "1");
-    const replaceSpy = vi
-      .spyOn(window.location, "replace")
-      .mockImplementation(() => undefined);
-
-    render(<LoginPage />, { wrapper: createWrapper() });
-
-    await waitFor(() => {
-      expect(screen.getByText("Sign in to Multica")).toBeInTheDocument();
-    });
-    expect(replaceSpy).not.toHaveBeenCalled();
-  });
 });

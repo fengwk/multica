@@ -22,12 +22,6 @@ MULTICA_PROXY_AUTH_EMAIL_HEADER=X-Auth-Request-Email
 
 - 当 `MULTICA_PROXY_AUTH_EMAIL_HEADER` 为空或未设置时，代理认证保持关闭。
 
-### Web 登录自动跳转
-
-- 当构建时设置了 `NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER`，Web 登录页会自动将 `/login` 跳转到 `/auth/proxy-login`。
-- 通过 `proxy_auth_done=1` 保留 CLI 登录续接流程，避免重定向死循环。
-- 在 `docker-compose.selfhost.yml` 中，前端构建参数 `NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER` 会自动继承 `MULTICA_PROXY_AUTH_EMAIL_HEADER`。
-
 ### 接入说明
 
 - 对于放在已认证反向代理后的最小化自部署场景，只需要转发当前登录用户邮箱：
@@ -58,7 +52,6 @@ env -u GOROOT go test ./internal/handler -run 'TestProxyLogin|TestSendCode|TestV
 - 单镜像构建时会读取以下仓库变量作为 build args：
   - `NEXT_PUBLIC_GOOGLE_CLIENT_ID`
   - `NEXT_PUBLIC_WS_URL`
-  - `MULTICA_PROXY_AUTH_EMAIL_HEADER`
 
 ### Docker 单镜像模式
 

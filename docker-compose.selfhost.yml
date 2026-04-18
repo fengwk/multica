@@ -69,7 +69,6 @@ services:
         REMOTE_API_URL: http://backend:8080
         NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}
         NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
-        NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER: ${MULTICA_PROXY_AUTH_EMAIL_HEADER:-}
     depends_on:
       - backend
     ports:

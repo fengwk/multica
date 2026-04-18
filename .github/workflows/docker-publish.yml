@@ -19,24 +19,6 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: backend
-            image_name: multica-backend
-            dockerfile: Dockerfile
-            build_args: |
-              VERSION=${{ github.ref_name }}
-              COMMIT=${{ github.sha }}
-          - name: web
-            image_name: multica-web
-            dockerfile: Dockerfile.web
-            build_args: |
-              REMOTE_API_URL=http://backend:8080
-              NEXT_PUBLIC_GOOGLE_CLIENT_ID=${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
-              NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL }}
-              NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER=${{ vars.MULTICA_PROXY_AUTH_EMAIL_HEADER }}
 
     steps:
       - name: 校验 Docker Hub 配置
@@ -70,7 +52,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.DOCKERHUB_NAMESPACE }}/${{ matrix.image_name }}
+          images: ${{ env.DOCKERHUB_NAMESPACE }}/multica
           tags: |
             type=raw,value=docker
             type=raw,value=latest
@@ -80,9 +62,15 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile.multica
           push: true
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            REMOTE_API_URL=http://127.0.0.1:8080
+            NEXT_PUBLIC_GOOGLE_CLIENT_ID=${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
+            NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL }}
+            NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER=${{ vars.MULTICA_PROXY_AUTH_EMAIL_HEADER }}

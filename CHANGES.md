@@ -50,14 +50,23 @@ env -u GOROOT go test ./internal/handler -run 'TestProxyLogin|TestSendCode|TestV
 
 - 移除了原有的 `CI` 与 `Release` 工作流。
 - 新增 `docker-publish.yml`，在 `docker` 分支收到 push 时自动构建并推送 Docker Hub 镜像。
-- 新工作流会发布两个镜像：
-  - `${DOCKERHUB_NAMESPACE}/multica-backend`
-  - `${DOCKERHUB_NAMESPACE}/multica-web`
+- 发布方式改为单镜像 `fengwk/multica`，镜像内同时包含 Web 与 Backend 运行时。
 - 需要在 GitHub 仓库中配置：
   - `DOCKERHUB_USERNAME`（secret）
   - `DOCKERHUB_TOKEN`（secret）
   - `DOCKERHUB_NAMESPACE`（variable，可选；未设置时回退到 `DOCKERHUB_USERNAME`）
-- Web 镜像构建时会读取以下仓库变量作为 build args：
+- 单镜像构建时会读取以下仓库变量作为 build args：
   - `NEXT_PUBLIC_GOOGLE_CLIENT_ID`
   - `NEXT_PUBLIC_WS_URL`
   - `MULTICA_PROXY_AUTH_EMAIL_HEADER`
+
+### Docker 单镜像模式
+
+- 新增 `Dockerfile.multica`，在同一个镜像中构建并打包：
+  - Go backend / migrate / CLI 二进制
+  - Next.js standalone Web 产物
+- 新增 `docker/entrypoint.multica.sh`，容器启动时会：
+  1. 先执行数据库迁移
+  2. 在容器内启动 backend（默认 `127.0.0.1:8080` 对应的内部访问目标）
+  3. 启动 web（对外提供 `3000` 端口）
+- Web 在构建时固定转发到 `http://127.0.0.1:8080`，不再依赖部署环境中的容器别名或服务名。

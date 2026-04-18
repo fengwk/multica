@@ -1,0 +1,88 @@
+# --- Web dependencies ---
+FROM node:22-alpine AS web-deps
+
+RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+
+WORKDIR /app
+
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json .npmrc ./
+COPY apps/web/package.json apps/web/
+COPY packages/core/package.json packages/core/
+COPY packages/ui/package.json packages/ui/
+COPY packages/views/package.json packages/views/
+COPY packages/tsconfig/package.json packages/tsconfig/
+COPY packages/eslint-config/package.json packages/eslint-config/
+
+RUN pnpm install --frozen-lockfile
+
+# --- Web build ---
+FROM node:22-alpine AS web-builder
+
+RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+
+WORKDIR /app
+
+COPY --from=web-deps /app ./
+COPY package.json turbo.json pnpm-workspace.yaml ./
+COPY apps/web/ apps/web/
+COPY packages/ packages/
+
+RUN pnpm install --frozen-lockfile --offline
+
+ARG REMOTE_API_URL=http://127.0.0.1:8080
+ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ARG NEXT_PUBLIC_WS_URL
+ARG NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER
+ENV REMOTE_API_URL=$REMOTE_API_URL
+ENV NEXT_PUBLIC_GOOGLE_CLIENT_ID=$NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
+ENV NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER=$NEXT_PUBLIC_PROXY_AUTH_EMAIL_HEADER
+ENV STANDALONE=true
+
+RUN pnpm --filter @multica/web build
+
+# --- Go build ---
+FROM golang:1.26-alpine AS go-builder
+
+RUN apk add --no-cache git
+
+WORKDIR /src
+
+COPY server/go.mod server/go.sum ./server/
+RUN cd server && go mod download
+
+COPY server/ ./server/
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN cd server && CGO_ENABLED=0 go build -ldflags "-s -w" -o bin/server ./cmd/server
+RUN cd server && CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o bin/multica ./cmd/multica
+RUN cd server && CGO_ENABLED=0 go build -ldflags "-s -w" -o bin/migrate ./cmd/migrate
+
+# --- Runtime ---
+FROM node:22-alpine AS runner
+
+RUN apk add --no-cache ca-certificates tzdata wget
+
+WORKDIR /app
+
+COPY --from=go-builder /src/server/bin/server ./server
+COPY --from=go-builder /src/server/bin/multica ./multica
+COPY --from=go-builder /src/server/bin/migrate ./migrate
+COPY --from=go-builder /src/server/migrations ./migrations
+
+COPY --from=web-builder /app/apps/web/.next/standalone ./
+COPY --from=web-builder /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=web-builder /app/apps/web/public ./apps/web/public
+
+COPY docker/entrypoint.multica.sh ./entrypoint.sh
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh && mkdir -p /app/data
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+ENV BACKEND_PORT=8080
+
+EXPOSE 3000
+
+ENTRYPOINT ["./entrypoint.sh"]

@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/realtime"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -55,7 +56,7 @@ func TestMain(m *testing.M) {
 	go hub.Run()
 	bus := events.New()
 	emailSvc := service.NewEmailService()
-	testHandler = New(queries, pool, hub, bus, emailSvc, nil, nil)
+	testHandler = New(queries, pool, hub, bus, emailSvc, nil, nil, analytics.NoopClient{}, Config{AllowSignup: true})
 	testPool = pool
 
 	testUserID, testWorkspaceID, err = setupHandlerTestFixture(ctx, pool)
@@ -930,6 +931,33 @@ func TestProxyLoginRedirectsCliFlowToLoginPage(t *testing.T) {
 	}
 	if got := parsed.Query().Get("proxy_auth_done"); got != "1" {
 		t.Fatalf("ProxyLogin: expected proxy_auth_done=1, got %q", got)
+	}
+}
+
+func TestSendCodeDbError(t *testing.T) {
+	// We can't easily mock the DB here without changing architecture,
+	// but we can simulate a DB error by using a cancelled request context.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	w := httptest.NewRecorder()
+	body := map[string]string{"email": "dberror-test@multica.ai"}
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(body)
+	req := httptest.NewRequest("POST", "/auth/send-code", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+
+	testHandler.SendCode(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("SendCode (db error): expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "failed to lookup user" {
+		t.Fatalf("SendCode (db error): expected error message 'failed to lookup user', got '%s'", resp["error"])
 	}
 }
 

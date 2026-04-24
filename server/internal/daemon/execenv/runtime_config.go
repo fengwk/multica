@@ -15,16 +15,18 @@ import (
 // For Copilot:  writes {workDir}/AGENTS.md  (skills discovered natively from .github/skills/)
 // For OpenCode: writes {workDir}/AGENTS.md  (skills discovered natively from .config/opencode/skills/)
 // For OpenClaw: writes {workDir}/AGENTS.md  (skills discovered natively from .openclaw/skills/)
+// For Hermes:   writes {workDir}/AGENTS.md  (skills fall back to .agent_context/skills/; AGENTS.md points there)
 // For Gemini:   writes {workDir}/GEMINI.md  (discovered natively by the Gemini CLI)
 // For Pi:       writes {workDir}/AGENTS.md  (skills discovered natively from ~/.pi/agent/skills/)
 // For Cursor:   writes {workDir}/AGENTS.md  (skills discovered natively from .cursor/skills/)
+// For Kimi:     writes {workDir}/AGENTS.md  (Kimi Code CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
 func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) error {
 	content := buildMetaSkillContent(provider, ctx)
 
 	switch provider {
 	case "claude":
 		return os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte(content), 0o644)
-	case "codex", "copilot", "opencode", "openclaw", "pi", "cursor":
+	case "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi":
 		return os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte(content), 0o644)
 	case "gemini":
 		return os.WriteFile(filepath.Join(workDir, "GEMINI.md"), []byte(content), 0o644)
@@ -129,19 +131,21 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the conversation\n", ctx.IssueID)
 		b.WriteString("   - If the output is very large or truncated, use pagination: `--limit 30` to get the latest 30 comments, or `--since <timestamp>` to fetch only recent ones\n")
 		fmt.Fprintf(&b, "3. Find the triggering comment (ID: `%s`) and understand what is being asked — do NOT confuse it with previous comments\n", ctx.TriggerCommentID)
-		fmt.Fprintf(&b, "4. Reply: `multica issue comment add %s --parent %s --content \"...\"`\n", ctx.IssueID, ctx.TriggerCommentID)
-		b.WriteString("5. If the comment requests code changes or further work, do the work first, then reply with your results\n")
-		b.WriteString("6. Do NOT change the issue status unless the comment explicitly asks for it\n\n")
+		b.WriteString("4. **Decide whether a reply is warranted.** If the triggering comment is an acknowledgment / thanks / sign-off from another agent and no concrete question or task is being asked of you, do NOT post a reply — just exit. Silence is a valid and preferred way to end agent-to-agent conversations.\n")
+		b.WriteString("5. If a reply IS warranted: do any requested work first, then **decide whether to include any `@mention` link.** The default is NO mention. Only mention when you are escalating to a human owner who is not yet involved, delegating a concrete new sub-task to another agent for the first time, or the user explicitly asked you to loop someone in. Never @mention the agent you are replying to as a thank-you or sign-off.\n")
+		b.WriteString("6. **If you reply, post it as a comment — this step is mandatory when you reply.** Text in your terminal or run logs is NOT delivered to the user. ")
+		b.WriteString(BuildCommentReplyInstructions(ctx.IssueID, ctx.TriggerCommentID))
+		b.WriteString("7. Do NOT change the issue status unless the comment explicitly asks for it\n\n")
 	} else {
 		// Assignment-triggered: defer to agent Skills for workflow specifics.
 		b.WriteString("You are responsible for managing the issue status throughout your work.\n\n")
 		fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand your task\n", ctx.IssueID)
 		fmt.Fprintf(&b, "2. Run `multica issue status %s in_progress`\n", ctx.IssueID)
 		b.WriteString("3. Read comments for additional context or human instructions\n")
-		b.WriteString("4. Follow your Skills and Agent Identity to determine how to complete this task.\n")
-		b.WriteString("   If no relevant skill applies, the default workflow is: understand the task → do the work → post a comment with results → update issue status.\n")
-		fmt.Fprintf(&b, "5. When done, run `multica issue status %s in_review`\n", ctx.IssueID)
-		fmt.Fprintf(&b, "6. If blocked, run `multica issue status %s blocked` and post a comment explaining why\n\n", ctx.IssueID)
+		b.WriteString("4. Follow your Skills and Agent Identity to complete the task (write code, investigate, etc.)\n")
+		fmt.Fprintf(&b, "5. **Post your final results as a comment — this step is mandatory**: `multica issue comment add %s --content \"...\"`. Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n", ctx.IssueID)
+		fmt.Fprintf(&b, "6. When done, run `multica issue status %s in_review`\n", ctx.IssueID)
+		fmt.Fprintf(&b, "7. If blocked, run `multica issue status %s blocked` and post a comment explaining why\n\n", ctx.IssueID)
 	}
 
 	if len(ctx.AgentSkills) > 0 {
@@ -150,11 +154,12 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		case "claude":
 			// Claude discovers skills natively from .claude/skills/ — just list names.
 			b.WriteString("You have the following skills installed (discovered automatically):\n\n")
-		case "codex", "copilot", "opencode", "openclaw", "pi", "cursor":
-			// Codex, Copilot, OpenCode, OpenClaw, Pi, and Cursor discover skills natively from their respective paths — just list names.
+		case "codex", "copilot", "opencode", "openclaw", "pi", "cursor", "kimi":
+			// Codex, Copilot, OpenCode, OpenClaw, Pi, Cursor, and Kimi discover skills natively from their respective paths — just list names.
 			b.WriteString("You have the following skills installed (discovered automatically):\n\n")
-		case "gemini":
-			// Gemini reads GEMINI.md directly; point it at the fallback skills dir.
+		case "gemini", "hermes":
+			// Gemini reads GEMINI.md directly; Hermes has no native skills discovery path
+			// wired up in resolveSkillsDir, so both fall back to .agent_context/skills/.
 			b.WriteString("Detailed skill instructions are in `.agent_context/skills/`. Each subdirectory contains a `SKILL.md`.\n\n")
 		default:
 			b.WriteString("Detailed skill instructions are in `.agent_context/skills/`. Each subdirectory contains a `SKILL.md`.\n\n")
@@ -166,12 +171,19 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	}
 
 	b.WriteString("## Mentions\n\n")
-	b.WriteString("When referencing issues or people in comments, use the mention format so they render as interactive links:\n\n")
-	b.WriteString("- **Issue**: `[MUL-123](mention://issue/<issue-id>)` — renders as a clickable link to the issue\n")
-	b.WriteString("- **Member**: `[@Name](mention://member/<user-id>)` — renders as a styled mention and sends a notification\n")
-	b.WriteString("- **Agent**: `[@Name](mention://agent/<agent-id>)` — renders as a styled mention and re-triggers the agent\n\n")
-	b.WriteString("⚠️ Agent and member mentions are **actions**, not text references: agent mentions enqueue a new task for the agent, and member mentions send a notification. ")
-	b.WriteString("If you only want to refer to someone by name in prose (e.g. \"GPT-Boy is correct\"), write the plain name without the mention link.\n\n")
+	b.WriteString("Mention links are **side-effecting actions**, not just formatting:\n\n")
+	b.WriteString("- `[MUL-123](mention://issue/<issue-id>)` — clickable link to an issue (safe, no side effect)\n")
+	b.WriteString("- `[@Name](mention://member/<user-id>)` — **sends a notification to a human**\n")
+	b.WriteString("- `[@Name](mention://agent/<agent-id>)` — **enqueues a new run for that agent**\n\n")
+	b.WriteString("### When NOT to use a mention link\n\n")
+	b.WriteString("- Referring to someone in prose (e.g. \"GPT-Boy is right\") — write the plain name, no link.\n")
+	b.WriteString("- **Replying to another agent that just spoke to you.** By default, do NOT put a `mention://agent/...` link anywhere in your reply. The platform already shows your comment to everyone on the issue; re-mentioning the other agent will make them run again, and if they reply with a mention back, you will be triggered again. That is a loop and it costs the user money.\n")
+	b.WriteString("- Thanking, acknowledging, wrapping up, or signing off. These are exactly the moments where an accidental `@mention` causes the other agent to reply \"you're welcome\" and restart the loop. If the work is done, **end with no mention at all**.\n\n")
+	b.WriteString("### When a mention IS appropriate\n\n")
+	b.WriteString("- Escalating to a human owner who is not yet involved.\n")
+	b.WriteString("- Delegating a concrete sub-task to another agent for the first time, with a clear request.\n")
+	b.WriteString("- The user explicitly asked you to loop someone in.\n\n")
+	b.WriteString("If you are unsure whether a mention is warranted, **don't mention**. Silence ends conversations; `@` restarts them.\n\n")
 	b.WriteString("Use `multica issue list --output json` to look up issue IDs, and `multica workspace members --output json` for member IDs.\n\n")
 
 	b.WriteString("## Attachments\n\n")
@@ -189,10 +201,11 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("do NOT attempt to work around it. Instead, post a comment mentioning the workspace owner to request the missing functionality.\n\n")
 
 	b.WriteString("## Output\n\n")
+	b.WriteString("⚠️ **Final results MUST be delivered via `multica issue comment add`.** The user does NOT see your terminal output, assistant chat text, or run logs — only comments on the issue. A task that finishes without a result comment is invisible to the user, even if the work itself was correct.\n\n")
 	b.WriteString("Keep comments concise and natural — state the outcome, not the process.\n")
 	b.WriteString("Good: \"Fixed the login redirect. PR: https://...\"\n")
 	b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")
-	b.WriteString("When referencing issues in comments, **always** use the mention format `[MUL-123](mention://issue/<issue-id>)` so they render as clickable links.\n")
+	b.WriteString("When referencing an issue in a comment, use the issue mention format `[MUL-123](mention://issue/<issue-id>)` so it renders as a clickable link. (Issue mentions have no side effect; only member/agent mentions do — see the Mentions section above.)\n")
 
 	return b.String()
 }

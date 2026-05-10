@@ -16,12 +16,13 @@
  * - Rendering mentions with the same IssueMentionCard component and .mention class
  */
 
-import { useMemo, useRef, useState } from "react";
+import { isValidElement, memo, useMemo, useRef, useState } from "react";
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
 } from "react-markdown";
 import rehypeKatex from "rehype-katex";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
@@ -34,11 +35,14 @@ import { toast } from "sonner";
 import { cn } from "@multica/ui/lib/utils";
 import { useWorkspacePaths, useWorkspaceSlug } from "@multica/core/paths";
 import { useNavigation } from "../navigation";
+import { useT } from "../i18n";
 import { IssueMentionCard } from "../issues/components/issue-mention-card";
 import { ImageLightbox } from "./extensions/image-view";
 import { useLinkHover, LinkHoverCard } from "./link-hover-card";
 import { openLink, isMentionHref } from "./utils/link-handler";
 import { preprocessMarkdown } from "./utils/preprocess";
+import { MermaidDiagram } from "./mermaid-diagram";
+import "katex/dist/katex.min.css";
 import "./content-editor.css";
 
 // ---------------------------------------------------------------------------
@@ -162,6 +166,7 @@ const components: Partial<Components> = {
 
   // Images — centered with toolbar + lightbox (matches Tiptap ImageView NodeView)
   img: function ReadonlyImage({ src, alt }) {
+    const { t } = useT("editor");
     const [lightbox, setLightbox] = useState(false);
     const imgSrc = typeof src === "string" ? src : "";
     const imgAlt = alt ?? "";
@@ -173,9 +178,9 @@ const components: Partial<Components> = {
     const handleCopyLink = async () => {
       try {
         await navigator.clipboard.writeText(imgSrc);
-        toast.success("Link copied");
+        toast.success(t(($) => $.image.link_copied));
       } catch {
-        toast.error("Failed to copy link");
+        toast.error(t(($) => $.image.copy_link_failed));
       }
     };
 
@@ -188,13 +193,13 @@ const components: Partial<Components> = {
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
-            <button type="button" onClick={handleView} title="View image">
+            <button type="button" onClick={handleView} title={t(($) => $.image.view)}>
               <Maximize2 className="size-3.5" />
             </button>
-            <button type="button" onClick={handleDownload} title="Download">
+            <button type="button" onClick={handleDownload} title={t(($) => $.image.download)}>
               <Download className="size-3.5" />
             </button>
-            <button type="button" onClick={handleCopyLink} title="Copy link">
+            <button type="button" onClick={handleCopyLink} title={t(($) => $.image.copy_link)}>
               <LinkIcon className="size-3.5" />
             </button>
           </span>
@@ -249,6 +254,10 @@ const components: Partial<Components> = {
       node?.position &&
       node.position.start.line !== node.position.end.line;
 
+    if (isBlock && lang === "mermaid") {
+      return <MermaidDiagram chart={String(children).replace(/\n$/, "")} />;
+    }
+
     if (!isBlock && !lang) {
       // Inline code — CSS handles styling via .rich-text-editor code
       return <code {...props}>{children}</code>;
@@ -277,7 +286,12 @@ const components: Partial<Components> = {
   },
 
   // Pre — pass through (CSS handles styling via .rich-text-editor pre)
-  pre: ({ children }) => <pre>{children}</pre>,
+  pre: ({ children }) => {
+    if (isValidElement(children) && children.type === MermaidDiagram) {
+      return <>{children}</>;
+    }
+    return <pre>{children}</pre>;
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -289,7 +303,14 @@ interface ReadonlyContentProps {
   className?: string;
 }
 
-export function ReadonlyContent({ content, className }: ReadonlyContentProps) {
+// Memoized so a long timeline of comments (Inbox + IssueDetail) does not
+// re-run the full react-markdown + rehype-* + lowlight pipeline on every
+// parent re-render. Props are `content` and `className` (both strings), so
+// React.memo's default shallow comparison is value-equality here.
+export const ReadonlyContent = memo(function ReadonlyContent({
+  content,
+  className,
+}: ReadonlyContentProps) {
   const processed = useMemo(() => preprocessMarkdown(content), [content]);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const hover = useLinkHover(wrapperRef);
@@ -297,7 +318,7 @@ export function ReadonlyContent({ content, className }: ReadonlyContentProps) {
   return (
     <div ref={wrapperRef} className={cn("rich-text-editor readonly text-sm", className)}>
       <ReactMarkdown
-        remarkPlugins={[remarkMath, [remarkGfm, { singleTilde: false }]]}
+        remarkPlugins={[remarkMath, remarkBreaks, [remarkGfm, { singleTilde: false }]]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeKatex]}
         urlTransform={urlTransform}
         components={components}
@@ -307,4 +328,4 @@ export function ReadonlyContent({ content, className }: ReadonlyContentProps) {
       <LinkHoverCard {...hover} />
     </div>
   );
-}
+});

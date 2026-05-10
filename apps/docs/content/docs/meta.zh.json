@@ -9,6 +9,7 @@
     "workspaces",
     "members-roles",
     "issues",
+    "projects",
     "comments",
     "---智能体---",
     "agents",
@@ -22,7 +23,7 @@
     "assigning-issues",
     "mentioning-agents",
     "chat",
-    "routines",
+    "autopilots",
     "---收件箱---",
     "inbox",
     "---自部署运维---",
@@ -32,6 +33,8 @@
     "---参考---",
     "cli",
     "auth-tokens",
-    "desktop-app"
+    "desktop-app",
+    "---开发者---",
+    "developers"
   ]
 }

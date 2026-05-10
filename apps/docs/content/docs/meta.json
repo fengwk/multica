@@ -9,7 +9,9 @@
     "workspaces",
     "members-roles",
     "issues",
+    "projects",
     "comments",
+    "project-resources",
     "---Agents---",
     "agents",
     "agents-create",
@@ -22,7 +24,7 @@
     "assigning-issues",
     "mentioning-agents",
     "chat",
-    "routines",
+    "autopilots",
     "---Inbox---",
     "inbox",
     "---Self-hosting & ops---",
@@ -32,6 +34,8 @@
     "---Reference---",
     "cli",
     "auth-tokens",
-    "desktop-app"
+    "desktop-app",
+    "---Developers---",
+    "developers"
   ]
 }

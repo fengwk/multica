@@ -152,6 +152,107 @@ describe("ApiClient", () => {
     expect(headers["X-Client-OS"]).toBeUndefined();
   });
 
+  it("uses the Cloud Runtime node API contract", async () => {
+    const node = {
+      id: "node-1",
+      owner_id: "user-1",
+      instance_id: "i-0123456789abcdef0",
+      region: "us-west-2",
+      instance_type: "g5.xlarge",
+      image_id: "ami-1",
+      subnet_id: "subnet-1",
+      name: "gpu-dev-01",
+      status: "launching",
+      tags: {},
+      metadata: {},
+      created_at: "2026-05-21T08:30:00Z",
+      updated_at: "2026-05-21T08:30:00Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(node), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await client.listCloudRuntimeNodes({ limit: 20, offset: 5 });
+    await client.createCloudRuntimeNode(
+      { instance_type: "g5.xlarge", name: "gpu-dev-01" },
+    );
+
+    const listCall = fetchMock.mock.calls[0]!;
+    const createCall = fetchMock.mock.calls[1]!;
+    expect(listCall[0]).toBe(
+      "https://api.example.test/api/cloud-runtime/nodes?limit=20&offset=5",
+    );
+    expect(createCall[0]).toBe(
+      "https://api.example.test/api/cloud-runtime/nodes",
+    );
+    expect(createCall[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        instance_type: "g5.xlarge",
+        name: "gpu-dev-01",
+      }),
+    });
+  });
+
+  it("falls back when Cloud Runtime node responses drift", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ id: 123 }]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 123 }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+
+    await expect(client.listCloudRuntimeNodes()).resolves.toEqual([]);
+    await expect(
+      client.createCloudRuntimeNode({ instance_type: "g5.xlarge" }),
+    ).resolves.toMatchObject({ id: "", status: "" });
+  });
+
+  it("deleteCloudRuntimeNode sends DELETE with JSON body containing instance id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(null, { status: 204 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await client.deleteCloudRuntimeNode("i-0123456789abcdef0");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://api.example.test/api/cloud-runtime/nodes");
+    expect(opts).toMatchObject({
+      method: "DELETE",
+      body: JSON.stringify({ instance_id: "i-0123456789abcdef0" }),
+    });
+    expect((opts.headers as Record<string, string>)["Content-Type"]).toBe(
+      "application/json",
+    );
+  });
+
   describe("getAttachment", () => {
     it("returns the parsed attachment for a well-formed response", async () => {
       vi.stubGlobal(
@@ -258,6 +359,68 @@ describe("ApiClient", () => {
       await expect(client.getAttachmentTextContent("att-1")).rejects.toBeInstanceOf(
         PreviewUnsupportedError,
       );
+    });
+  });
+
+  describe("listChatMessagesPage deployment-order fallback", () => {
+    const jsonResponse = (body: unknown, status: number, statusText = "") =>
+      new Response(JSON.stringify(body), {
+        status,
+        statusText,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    it("falls back to the legacy full-list endpoint when the paged route 404s", async () => {
+      const legacy = [
+        { id: "m1", role: "user", content: "hi", created_at: "2026-06-01T00:00:00Z" },
+        { id: "m2", role: "assistant", content: "yo", created_at: "2026-06-01T00:00:01Z" },
+      ];
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ error: "not found" }, 404, "Not Found"))
+        .mockResolvedValueOnce(jsonResponse(legacy, 200));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      const page = await client.listChatMessagesPage("session-1", { limit: 50 });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0]![0]).toBe(
+        "https://api.example.test/api/chat/sessions/session-1/messages/page?limit=50",
+      );
+      expect(fetchMock.mock.calls[1]![0]).toBe(
+        "https://api.example.test/api/chat/sessions/session-1/messages",
+      );
+      expect(page).toEqual({ messages: legacy, limit: 50, has_more: false, next_cursor: null });
+    });
+
+    it("does NOT fall back on a cursor request — a 404 there propagates", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ error: "not found" }, 404, "Not Found"));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      await expect(
+        client.listChatMessagesPage("session-1", {
+          before: { created_at: "2026-06-01T00:00:00Z", id: "m1" },
+        }),
+      ).rejects.toBeInstanceOf(ApiError);
+      // Only the paged request fires; no legacy full-list call that would duplicate messages.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("propagates non-404 errors instead of masking them with the legacy list", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ error: "boom" }, 500, "Internal Server Error"));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      await expect(client.listChatMessagesPage("session-1")).rejects.toMatchObject({
+        status: 500,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 

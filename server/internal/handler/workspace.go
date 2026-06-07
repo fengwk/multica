@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/logger"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -41,6 +42,7 @@ type WorkspaceResponse struct {
 	Settings    any     `json:"settings"`
 	Repos       any     `json:"repos"`
 	IssuePrefix string  `json:"issue_prefix"`
+	AvatarURL   *string `json:"avatar_url"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
 }
@@ -69,6 +71,7 @@ func workspaceToResponse(w db.Workspace) WorkspaceResponse {
 		Settings:    settings,
 		Repos:       repos,
 		IssuePrefix: w.IssuePrefix,
+		AvatarURL:   textToPtr(w.AvatarUrl),
 		CreatedAt:   timestampToString(w.CreatedAt),
 		UpdatedAt:   timestampToString(w.UpdatedAt),
 	}
@@ -141,6 +144,16 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Self-host gate (#3433): when the operator has set
+	// DISABLE_WORKSPACE_CREATION=true, no caller — including existing
+	// workspace owners — may create additional workspaces. The frontend
+	// hides every "Create workspace" affordance via /api/config, but the
+	// 403 here is the only authoritative check.
+	if h.cfg.DisableWorkspaceCreation {
+		writeError(w, http.StatusForbidden, "workspace creation is disabled for this instance")
+		return
+	}
+
 	var req CreateWorkspaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -201,32 +214,13 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Becoming a workspace member is the physical event that "completes" onboarding —
-	// keep this atomic with CreateMember so `member` and `onboarded_at`
-	// can never disagree. COALESCE in MarkUserOnboarded keeps it idempotent.
-	updatedUser, err := qtx.MarkUserOnboarded(r.Context(), parseUUID(userID))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to mark user onboarded")
-		return
-	}
-
-	// Brand-new workspaces never have a runtime yet, so seed the
-	// "install a runtime" issue so the user lands on a concrete next step.
-	// claimStarterContentStateIfUnset suppresses the legacy starter-content
-	// dialog on older desktop builds that still render it when the column
-	// is NULL.
-	seededIssue, seededIssueCreated, err := ensureNoRuntimeOnboardingIssue(
-		r.Context(), qtx, ws.ID, parseUUID(userID), updatedUser.Language,
-	)
-	if err != nil {
-		slog.Warn("create workspace: ensure install-runtime issue failed", append(logger.RequestAttrs(r), "error", err, "workspace_id", uuidToString(ws.ID))...)
-		writeError(w, http.StatusInternalServerError, "failed to seed onboarding issue")
-		return
-	}
-	if err := claimStarterContentStateIfUnset(r.Context(), qtx, parseUUID(userID), updatedUser.StarterContentState); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to record starter content state")
-		return
-	}
+	// NOTE: CreateWorkspace deliberately does NOT mark the user as
+	// onboarded. The `onboarded_at` flag is owned by CompleteOnboarding
+	// (Step 3 of the flow) and by AcceptInvitation (invitee joining an
+	// existing workspace). This decouples "the user has a workspace"
+	// from "the user has finished setup"; the workspace-layer route
+	// gate (web layout / desktop App.tsx overlay) redirects un-onboarded
+	// users back to /onboarding instead.
 
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create workspace")
@@ -239,22 +233,7 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	// at whether they have a prior workspace_created event, not stamped at
 	// emit time. Stamping here would race under concurrent creates without
 	// a schema change, and the event stream answers the question exactly.
-	h.Analytics.Capture(analytics.WorkspaceCreated(userID, wsID))
-
-	if seededIssueCreated {
-		prefix := h.getIssuePrefix(r.Context(), seededIssue.WorkspaceID)
-		issueResp := issueToResponse(seededIssue, prefix)
-		h.publish(protocol.EventIssueCreated, wsID, "member", userID, map[string]any{"issue": issueResp})
-		h.Analytics.Capture(analytics.IssueCreated(
-			userID,
-			wsID,
-			uuidToString(seededIssue.ID),
-			"",
-			"",
-			"",
-			analytics.SourceOnboarding,
-		))
-	}
+	obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.WorkspaceCreated(userID, wsID))
 
 	slog.Info("workspace created", append(logger.RequestAttrs(r), "workspace_id", wsID, "name", ws.Name, "slug", ws.Slug)...)
 	writeJSON(w, http.StatusCreated, workspaceToResponse(ws))
@@ -267,6 +246,7 @@ type UpdateWorkspaceRequest struct {
 	Settings    any     `json:"settings"`
 	Repos       any     `json:"repos"`
 	IssuePrefix *string `json:"issue_prefix"`
+	AvatarURL   *string `json:"avatar_url"`
 }
 
 func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -312,6 +292,9 @@ func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 		if prefix != "" {
 			params.IssuePrefix = pgtype.Text{String: prefix, Valid: true}
 		}
+	}
+	if req.AvatarURL != nil {
+		params.AvatarUrl = pgtype.Text{String: *req.AvatarURL, Valid: true}
 	}
 
 	ws, err := h.Queries.UpdateWorkspace(r.Context(), params)
